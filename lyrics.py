@@ -16,72 +16,141 @@ UA = (
 )
 
 
+def clean_title(title: str) -> str:
+    """去掉标题中常见的噪音后缀，提取纯净的歌名+歌手信息"""
+    # 去掉括号内的版本信息
+    title = re.sub(r'[\(（][^)）]*?(?:Official|官方|MV|Music Video|Live|现场|Cover|翻唱|Remix|Ver\.|Version|Explicit)[^)）]*?[\)）]',
+                   '', title, flags=re.IGNORECASE)
+    # 去掉方括号内的标签
+    title = re.sub(r'[\[【][^\]】]*?(?:MV|HD|4K|1080p|Hi-res|Hi-Res|无损|高清|纯享|动态歌词|Lyrics|Audio|Official)[^\]】]*?[\]】]',
+                   '', title, flags=re.IGNORECASE)
+    # 去掉单独的标签前缀
+    title = re.sub(r'^[\[【].+?[\]】]\s*', '', title)
+    # 去掉末尾的 -Topic / -VEVO 等频道名
+    title = re.sub(r'\s*[-–—]\s*Topic\s*$', '', title)
+    title = re.sub(r'\s*VEVO\s*$', '', title)
+    # 合并多余空格
+    title = re.sub(r'\s+', ' ', title).strip()
+    return title
+
+
 def extract_artist_song(title: str) -> tuple:
     """
     从视频标题中提取歌手和歌名。
-    支持多种常见中文标题格式：
-      - "陈奕迅《最佳损友》"
-      - "【Hi-res】陈奕迅 - 最佳损友"
-      - "在百万豪装录音棚大声听 陈奕迅《最佳损友》【Hi-res】"
+    覆盖绝大多数 B站 / YouTube / 音乐平台 的标题格式。
+
+    返回 (artist, song) 元组，缺省部分为空字符串。
     """
+    if not title:
+        return "", ""
+
+    # 先清理噪音
+    title = clean_title(title)
+
     artist, song = "", ""
 
-    # 格式: XXX《歌曲名》
-    m = re.search(r"《(.+?)》", title)
+    # ---- 模式1: 《歌曲名》----
+    m = re.search(r'《(.+?)》', title)
     if m:
-        song = m.group(1)
+        song = m.group(1).strip()
+        # 提取《》之前的部分作为歌手
+        before = title.split(f'《{song}》')[0].strip()
+        # 去掉分隔符
+        before = re.sub(r'\s*[-–—·|/~]\s*$', '', before)
+        if before:
+            artist = before
 
-    # 格式: 歌手 - 歌名 或 歌手·歌名
-    m = re.search(r"([一-鿿\w]+)\s*[-·]\s*([一-鿿\w「」『』【】《》\s]+)", title)
-    if m:
-        artist = m.group(1).strip()
-        if not song:
+    # ---- 模式2: 歌手 - 歌名 或 歌手 – 歌名（各种分隔符）----
+    if not artist or not song:
+        # 支持的分隔符: - – — · : |
+        m = re.search(
+            r'^(.+?)\s*[-–—·|/~:]\s*(.+?)$',
+            title
+        )
+        if m and not re.search(r'[《》]', title):
+            left = m.group(1).strip()
+            right = m.group(2).strip()
+            # 左边不能太长（超过30字不像歌手名）
+            if len(left) <= 30 and left and right:
+                artist = left
+                song = right
+
+    # ---- 模式3: "歌名" by 歌手 ----
+    if not artist or not song:
+        m = re.search(r'^["“](.+?)["”]\s*by\s+(.+?)$', title, re.IGNORECASE)
+        if m:
+            song = m.group(1).strip()
+            artist = m.group(2).strip()
+
+    # ---- 模式4: 歌手 "歌名" ----
+    if not artist or not song:
+        m = re.search(r'^(.+?)\s+["“](.+?)["”]', title)
+        if m and len(m.group(1)) <= 30:
+            artist = m.group(1).strip()
             song = m.group(2).strip()
 
-    # 如果只找到歌名但没有歌手，尝试从歌名前的部分提取
+    # ---- 模式5: 只有《》找到了歌名，没有歌手 ----
     if song and not artist:
-        before_song = title.split(f"《{song}》")[0].strip()
-        # 去掉常见前缀
-        before_song = re.sub(
-            r"^(在|【.*?】|\[.*?\]|\[|】|\s|Hi-res|Hi-Res|无损|高清|纯享|MV|Official|官方|Live)+",
-            "", before_song
-        ).strip()
-        if before_song:
-            artist = before_song
+        # 尝试从歌名前提取歌手名
+        before = title.split(f'《{song}》')[0] if f'《{song}》' in title else title
+        before = re.sub(r'\s*[-–—·|/~]\s*$', '', before.strip())
+        if before and len(before) <= 30:
+            artist = before
 
-    # 如果都没匹配到，用整个标题搜索
+    # ---- 兜底: 都没匹配到，整个标题当歌名搜 ----
     if not song:
         song = title
         artist = ""
 
-    return artist.strip(), song.strip()
+    # 清理可能残留的噪音
+    artist = re.sub(r'\s+', ' ', artist).strip()
+    song = re.sub(r'\s+', ' ', song).strip()
+
+    return artist, song
 
 
 def search_lyrics(artist="", song="", title=""):
     """
-    搜索歌词。
-    返回 {"lyrics_lrc": "...", "lyrics_plain": "...", "source": "..."} 或 None
+    搜索歌词，返回 {"lyrics_lrc": "...", "lyrics_plain": "...", "source": "..."} 或 None。
+    采用多轮尝试策略，提高命中率。
     """
-    # 构建搜索关键词
-    if artist and song:
-        keywords = [artist, song]
-    elif song:
-        keywords = [song]
-    elif title:
-        # 从标题提取
+    # 如果只传了 title，先尝试提取
+    if title and not song:
         artist, song = extract_artist_song(title)
-        keywords = [artist, song] if artist else [song]
-    else:
+
+    if not song:
         return None
 
-    query = " ".join(keywords)
+    # 构建多组搜索关键词，按优先级尝试
+    keyword_sets = []
 
+    if artist and song:
+        # 精确搜索
+        keyword_sets.append(f"{artist} {song}")
+        # 只用歌名搜索
+        keyword_sets.append(song)
+    else:
+        keyword_sets.append(song)
+        # 尝试去掉括号内容再搜
+        clean = re.sub(r'[\(（\[【].*?[\)）\]】]', '', song).strip()
+        if clean and clean != song:
+            keyword_sets.append(clean)
+
+    for query in keyword_sets:
+        result = _search_netease(query)
+        if result:
+            return result
+
+    return None
+
+
+def _search_netease(query: str):
+    """在网易云音乐搜索歌词"""
     try:
-        # 网易云音乐搜索 API
-        url = "https://music.163.com/api/search/get"
-        params = urllib.parse.urlencode({"s": query, "type": 1, "limit": 3})
+        # 搜索歌曲
+        params = urllib.parse.urlencode({"s": query, "type": 1, "limit": 5})
         req = urllib.request.Request(
-            f"{url}?{params}",
+            f"https://music.163.com/api/search/get?{params}",
             headers={"User-Agent": UA, "Referer": "https://music.163.com"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -91,41 +160,42 @@ def search_lyrics(artist="", song="", title=""):
         if not songs:
             return None
 
-        # 取第一个结果
-        best = songs[0]
-        song_id = best["id"]
-        song_name = best["name"]
-        song_artists = ", ".join(a["name"] for a in best.get("artists", []))
+        # 逐个尝试获取歌词（有时第一个结果没歌词）
+        for song_info in songs[:3]:
+            song_id = song_info["id"]
+            song_name = song_info["name"]
+            song_artists = ", ".join(
+                a["name"] for a in song_info.get("artists", [])
+            )
 
-        # 获取歌词
-        lyric_url = f"https://music.163.com/api/song/lyric?id={song_id}&lv=1"
-        req2 = urllib.request.Request(
-            lyric_url,
-            headers={"User-Agent": UA, "Referer": "https://music.163.com"},
-        )
-        with urllib.request.urlopen(req2, timeout=10) as resp2:
-            lyric_data = json.loads(resp2.read().decode("utf-8"))
+            # 获取歌词
+            lyric_url = f"https://music.163.com/api/song/lyric?id={song_id}&lv=1"
+            req2 = urllib.request.Request(
+                lyric_url,
+                headers={"User-Agent": UA, "Referer": "https://music.163.com"},
+            )
+            with urllib.request.urlopen(req2, timeout=10) as resp2:
+                lyric_data = json.loads(resp2.read().decode("utf-8"))
 
-        lrc = lyric_data.get("lrc", {}).get("lyric", "")
-        tlyric = lyric_data.get("tlyric", {}).get("lyric", "")  # 翻译歌词
+            lrc = lyric_data.get("lrc", {}).get("lyric", "")
 
-        if not lrc.strip():
-            return None
+            if lrc and lrc.strip():
+                # 去掉 LRC 时间戳，生成纯文本
+                plain = re.sub(r"\[\d+:\d+[\.:]\d+\]", "", lrc).strip()
+                plain = re.sub(r"\n\s*\n", "\n", plain)
 
-        # 去掉 LRC 时间戳，生成纯文本版本
-        plain = re.sub(r"\[\d+:\d+[\.\:]\d+\]", "", lrc).strip()
-        plain = re.sub(r"\n\s*\n", "\n", plain)  # 去除空行
-
-        return {
-            "lyrics_lrc": lrc.strip(),
-            "lyrics_plain": plain,
-            "source": f"网易云音乐 - {song_name} / {song_artists}",
-            "song_name": song_name,
-            "artist": song_artists,
-        }
+                return {
+                    "lyrics_lrc": lrc.strip(),
+                    "lyrics_plain": plain,
+                    "source": f"网易云音乐 - {song_name} / {song_artists}",
+                    "song_name": song_name,
+                    "artist": song_artists,
+                }
 
     except Exception:
-        return None
+        pass
+
+    return None
 
 
 def embed_lyrics(mp3_path: str, lyrics_lrc: str) -> bool:
@@ -141,14 +211,13 @@ def embed_lyrics(mp3_path: str, lyrics_lrc: str) -> bool:
         except Exception:
             tags = ID3()
 
-        # 添加歌词标签
         uslt = USLT(
             encoding=Encoding.UTF8,
             lang="chi",
             desc="",
             text=lyrics_lrc,
         )
-        tags.delall("USLT")  # 先删除旧的
+        tags.delall("USLT")
         tags.add(uslt)
         tags.save(mp3_path)
         return True
