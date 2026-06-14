@@ -1,0 +1,41 @@
+# Python
+__pycache__
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Local downloads
+downloads/
+
+# Desktop-only files (Windows)
+start.bat
+start.py
+app_desktop.py
+build_exe.py
+extract_audio.py
+termux_setup.sh
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Render
+render.yaml
+
+# Docs
+DEPLOY.md
+README.md
+
+# IDE
+.vscode/
+.idea/

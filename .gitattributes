@@ -1,0 +1,9 @@
+# Docker/Linux 文件必须使用 LF 换行
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+*.sh text eol=lf
+render.yaml text eol=lf
+requirements.txt text eol=lf
+
+# Windows 批处理使用 CRLF
+*.bat text eol=crlf

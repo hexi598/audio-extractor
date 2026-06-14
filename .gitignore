@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# 本地下载的音频文件
+downloads/
+
+# 临时文件
+*.temp_audio
+.bili_temp_*
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# 环境变量（如有）
+.env

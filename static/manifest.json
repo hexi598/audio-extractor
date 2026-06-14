@@ -1,0 +1,23 @@
+{
+  "name": "视频音频提取",
+  "short_name": "音频提取",
+  "description": "从视频链接中提取高清音频，支持 B站、YouTube 等数千网站",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f0f1a",
+  "theme_color": "#7c3aed",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "categories": ["music", "utilities"]
+}

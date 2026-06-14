@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: audio-extractor
+    env: docker
+    region: singapore
+    plan: free
+    branch: main
+    healthCheckPath: /api/health
+    envVars:
+      - key: DOWNLOAD_DIR
+        value: /tmp/audio-extractor-downloads
+      - key: FILE_MAX_AGE
+        value: "1800"
+      - key: MAX_CONCURRENT_TASKS
+        value: "2"
