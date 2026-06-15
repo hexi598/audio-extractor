@@ -114,8 +114,16 @@ def api_request(url, params=None, cookies=None):
         raise RuntimeError(f"API 请求异常: {e}")
 
 
-def extract_bvid(url: str) -> str:
-    """从各种B站链接中提取 BV 号"""
+def extract_bvid(url: str) -> tuple:
+    """从各种B站链接中提取 BV 号和分P编号。
+    返回 (bvid, page_num) 元组，page_num 默认为 1。
+    """
+    # 解析 p 参数（分P）
+    page_num = 1
+    p_match = re.search(r'[?&]p=(\d+)', url)
+    if p_match:
+        page_num = int(p_match.group(1))
+
     patterns = [
         r"BV([a-zA-Z0-9]{10})",
         r"b23\.tv/([a-zA-Z0-9]+)",  # 短链接（需解析）
@@ -133,12 +141,15 @@ def extract_bvid(url: str) -> str:
                     return extract_bvid(final_url)
                 except Exception:
                     pass
-            return f"BV{bv}" if not bv.startswith("BV") else bv
+            bv = f"BV{bv}" if not bv.startswith("BV") else bv
+            return bv, page_num
     raise ValueError(f"无法从链接中解析 BV 号: {url}")
 
 
-def get_video_info(bvid: str, cookies=None):
-    """获取视频基本信息（标题、cid 等）"""
+def get_video_info(bvid: str, cookies=None, page=1):
+    """获取视频基本信息（标题、cid、分P列表等）。
+    page: 分P编号，从 1 开始。
+    """
     data = api_request(
         "https://api.bilibili.com/x/web-interface/view",
         {"bvid": bvid},
@@ -148,16 +159,37 @@ def get_video_info(bvid: str, cookies=None):
         raise RuntimeError(f"获取视频信息失败: {data.get('message', '未知错误')}")
 
     video_data = data["data"]
-    title = video_data.get("title", "unknown")
-    cid = video_data.get("cid", 0)
-    if not cid and video_data.get("pages"):
-        cid = video_data["pages"][0].get("cid", 0)
+    base_title = video_data.get("title", "unknown")
+    pages = video_data.get("pages", [])
+
+    if not pages:
+        raise RuntimeError("该视频没有可用的分P信息")
+
+    # 根据 page 选择正确的分P
+    page_index = page - 1  # 转为 0-based
+    if page_index < 0 or page_index >= len(pages):
+        raise RuntimeError(
+            f"分P编号 {page} 超出范围 (共 {len(pages)} 个分P)"
+        )
+
+    selected_page = pages[page_index]
+    cid = selected_page.get("cid", 0)
+    page_title = selected_page.get("part", "")
+
+    # 拼接标题：多P时显示 "主标题 - 分P标题"
+    if len(pages) > 1 and page_title and page_title != base_title:
+        title = f"{base_title} - P{page} {page_title}"
+    else:
+        title = base_title
 
     return {
         "title": title,
         "bvid": bvid,
         "cid": cid,
-        "duration": video_data.get("duration", 0),
+        "page": page,
+        "total_pages": len(pages),
+        "page_title": page_title,
+        "duration": selected_page.get("duration", video_data.get("duration", 0)),
     }
 
 
@@ -198,7 +230,7 @@ def get_audio_url(bvid: str, cid: int, cookies=None):
 
 
 def _download_raw_audio(url: str, output_path: str, backup_urls=None):
-    """下载原始音频流到临时文件"""
+    """下载原始音频流到临时文件（含完整性校验）"""
     import ssl
 
     if backup_urls is None:
@@ -226,19 +258,32 @@ def _download_raw_audio(url: str, output_path: str, backup_urls=None):
             }
             req = urllib.request.Request(try_url, headers=headers)
 
-            with urllib.request.urlopen(req, timeout=60, context=ssl_ctx) as resp:
-                total = int(resp.headers.get("Content-Length", 0))
+            with urllib.request.urlopen(req, timeout=120, context=ssl_ctx) as resp:
+                expected = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
                 with open(output_path, "wb") as f:
                     while True:
-                        chunk = resp.read(65536)
+                        chunk = resp.read(131072)  # 128KB buffer
                         if not chunk:
                             break
                         f.write(chunk)
                         downloaded += len(chunk)
-                return total or downloaded
+
+                # 完整性校验：对比 Content-Length
+                if expected > 0 and downloaded < expected:
+                    raise RuntimeError(
+                        f"下载不完整: 期望 {expected} 字节, 实际 {downloaded} 字节 "
+                        f"({downloaded * 100 // expected}%)"
+                    )
+                return downloaded or expected
         except Exception as e:
             last_error = e
+            # 如果是完整性错误，删除不完整的临时文件
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
             continue  # 试下一个 URL
 
     raise RuntimeError(f"下载失败 (已尝试 {len(all_urls)} 个地址): {last_error}")

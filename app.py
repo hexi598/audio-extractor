@@ -91,6 +91,49 @@ def find_ffmpeg():
     return None
 
 
+def find_ffprobe():
+    """自动查找 ffprobe（通常在 ffmpeg 同目录）"""
+    ffmpeg_path = find_ffmpeg()
+    if not ffmpeg_path:
+        return None
+
+    # 尝试在同目录找 ffprobe
+    ffmpeg_dir = os.path.dirname(ffmpeg_path)
+    candidates = []
+    if sys.platform == "win32":
+        candidates.append(os.path.join(ffmpeg_dir, "ffprobe.exe"))
+    else:
+        candidates.append(os.path.join(ffmpeg_dir, "ffprobe"))
+    candidates.extend(["ffprobe", "ffprobe.exe"])
+
+    for path in candidates:
+        try:
+            subprocess.run([path, "-version"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=True)
+            return path
+        except Exception:
+            continue
+    return None
+
+
+def get_audio_duration(file_path):
+    """用 ffprobe 获取音频文件时长（秒）"""
+    ffprobe_path = find_ffprobe()
+    if not ffprobe_path:
+        return None
+    try:
+        result = subprocess.run(
+            [ffprobe_path, "-v", "quiet", "-show_entries",
+             "format=duration", "-of", "csv=p=0", file_path],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
 def find_ytdlp():
     """查找 yt-dlp（支持 Linux / Windows / Docker）"""
     # 优先使用环境变量指定的路径
@@ -192,27 +235,28 @@ def is_bilibili_url(url):
 
 
 def extract_bilibili(task_id, url, output_name, audio_format, want_lyrics=True):
-    """使用自定义 API 提取 B站音频"""
+    """使用自定义 API 提取 B站音频（含多P支持）"""
     import bilibili_api as bl
 
     with task_lock:
         tasks[task_id] = {"status": "running", "message": "正在解析 B站链接..."}
 
     try:
-        bvid = bl.extract_bvid(url)
+        bvid, page_num = bl.extract_bvid(url)
     except Exception as e:
         with task_lock:
             tasks[task_id] = {"status": "error", "message": f"链接解析失败: {e}"}
         return
 
     try:
-        info = bl.get_video_info(bvid)
+        info = bl.get_video_info(bvid, page=page_num)
     except Exception as e:
         with task_lock:
             tasks[task_id] = {"status": "error", "message": f"获取视频信息失败: {e}"}
         return
 
     title = info["title"]
+    api_duration = info.get("duration", 0)  # B站 API 返回的时长（秒）
     with task_lock:
         tasks[task_id] = {
             "status": "running",
@@ -240,31 +284,41 @@ def extract_bilibili(task_id, url, output_name, audio_format, want_lyrics=True):
         if not ffmpeg_path:
             raise RuntimeError("未找到 ffmpeg")
 
-        # 下载原始音频流
+        # 下载原始音频流（含完整性校验）
         raw_file = os.path.join(OUTPUT_DIR, f".bili_temp_{task_id}")
-        bl._download_raw_audio(audio_url, raw_file, backup_urls)
+        raw_size = bl._download_raw_audio(audio_url, raw_file, backup_urls)
 
         with task_lock:
             tasks[task_id] = {"status": "running", "message": "正在转码为 MP3..."}
 
-        # 转码
+        # 转码（timeout 提升到 300s，长视频需要更长时间）
         subprocess.run([
             ffmpeg_path, "-y",
             "-i", raw_file,
             "-acodec", "libmp3lame",
             "-b:a", "320k", "-vn",
             output_file,
-        ], check=True, capture_output=True, timeout=120)
+        ], check=True, capture_output=True, timeout=300)
 
         # 清理临时文件
         if os.path.exists(raw_file):
             os.remove(raw_file)
 
         if os.path.exists(output_file):
+            # 验证输出文件时长
+            actual_duration = get_audio_duration(output_file)
+            duration_msg = ""
+            if actual_duration is not None and api_duration > 0:
+                ratio = actual_duration / api_duration
+                if ratio < 0.95:
+                    duration_msg = f" ⚠️ 时长异常: 文件 {actual_duration:.0f}s vs API {api_duration:.0f}s ({ratio:.0%})"
+                elif ratio > 1.05:
+                    duration_msg = f" ⚠️ 文件时长略长: {actual_duration:.0f}s vs API {api_duration:.0f}s"
+
             with task_lock:
                 tasks[task_id] = {
                     "status": "done",
-                    "message": "完成！",
+                    "message": f"完成！{duration_msg}",
                     "file": output_file,
                     "filename": os.path.basename(output_file),
                     "title": title,
